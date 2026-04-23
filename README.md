@@ -10,9 +10,12 @@ A .NET document database backed by a Git repository. See `docs/superpowers/specs
 - **Phase 2** (complete): `OptimisticReject` + `OptimisticMerge` concurrency modes,
   `IRecordMerger<T>` abstraction with `JsonPatchMerger<T>` default, create-if-absent
   via `Versions.Absent`, force-push detection + `HistoryRewritten` notifications.
+- **Phase 3** (complete): per-database `.schema.json` loading, equality/range/unique
+  indexes built from record content, LINQ expression-based query API with index-aware
+  execution and full-scan threshold, unique constraint enforcement on write.
 
-Later phases add indexing + queries (Phase 3), real Git transports (Phase 4),
-and the Orleans distribution layer (Phase 5).
+Later phases add real Git transports (Phase 4) and the Orleans distribution layer
+(Phase 5).
 
 ## Build and test
 
