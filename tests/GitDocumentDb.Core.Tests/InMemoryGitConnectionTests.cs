@@ -110,6 +110,25 @@ public class InMemoryGitConnectionTests
         dbs.Should().BeEquivalentTo("refs/heads/db/one", "refs/heads/db/two");
     }
 
+    [Fact]
+    public async Task GetCommitParents_returns_empty_for_root_commit()
+    {
+        var c = new InMemoryGitConnection();
+        var commit = await CreateEmptyCommit(c, null);
+        var parents = await c.GetCommitParentsAsync(commit, Ct);
+        parents.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task GetCommitParents_returns_single_parent_for_linear_commit()
+    {
+        var c = new InMemoryGitConnection();
+        var first = await CreateEmptyCommit(c, null);
+        var second = await CreateEmptyCommit(c, first);
+        var parents = await c.GetCommitParentsAsync(second, Ct);
+        parents.Should().BeEquivalentTo(new[] { first });
+    }
+
     private static async Task<string> CreateEmptyCommit(IGitConnection c, string? parent)
     {
         var tree = await c.WriteTreeAsync(new TreeBuildSpec(null, Array.Empty<TreeMutation>()), Ct);

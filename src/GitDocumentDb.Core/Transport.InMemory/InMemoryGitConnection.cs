@@ -10,7 +10,7 @@ public sealed class InMemoryGitConnection : IGitConnection
 {
     private readonly ConcurrentDictionary<string, byte[]> _blobs = new();
     private readonly ConcurrentDictionary<string, Dictionary<string, (string sha, TreeEntryKind kind)>> _trees = new();
-    private readonly ConcurrentDictionary<string, string> _commits = new();
+    private readonly ConcurrentDictionary<string, (string TreeSha, string? ParentSha)> _commits = new();
     private readonly ConcurrentDictionary<string, string> _refs = new();
 
     public Task<string?> ResolveRefAsync(string refName, CancellationToken ct)
@@ -27,8 +27,9 @@ public sealed class InMemoryGitConnection : IGitConnection
 
     public Task<ITreeView> GetTreeAsync(string commitSha, CancellationToken ct)
     {
-        if (!_commits.TryGetValue(commitSha, out var treeSha))
+        if (!_commits.TryGetValue(commitSha, out var entry))
             throw new InvalidOperationException($"Unknown commit {commitSha}");
+        var treeSha = entry.TreeSha;
         var entries = _trees.TryGetValue(treeSha, out var t) ? t : new();
         return Task.FromResult<ITreeView>(new InMemoryTreeView(commitSha, new(entries)));
     }
@@ -80,7 +81,7 @@ public sealed class InMemoryGitConnection : IGitConnection
         var bytes = Encoding.UTF8.GetBytes(sb.ToString());
         var hash = SHA1.HashData(bytes);
         var commitSha = Convert.ToHexStringLower(hash);
-        _commits.TryAdd(commitSha, spec.TreeSha);
+        _commits.TryAdd(commitSha, (spec.TreeSha, spec.ParentSha));
         return Task.FromResult(commitSha);
     }
 
@@ -113,6 +114,16 @@ public sealed class InMemoryGitConnection : IGitConnection
     {
         var sha = await ResolveRefAsync(refName, ct);
         return new FetchResult(false, sha ?? "", sha ?? "", Array.Empty<string>());
+    }
+
+    public Task<IReadOnlyList<string>> GetCommitParentsAsync(string commitSha, CancellationToken ct)
+    {
+        if (!_commits.TryGetValue(commitSha, out var entry))
+            throw new InvalidOperationException($"Unknown commit {commitSha}");
+        IReadOnlyList<string> parents = entry.ParentSha is null
+            ? Array.Empty<string>()
+            : new[] { entry.ParentSha };
+        return Task.FromResult(parents);
     }
 
     private static string HashTree(Dictionary<string, (string sha, TreeEntryKind kind)> entries)

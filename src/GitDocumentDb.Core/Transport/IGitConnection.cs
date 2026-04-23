@@ -16,4 +16,6 @@ public interface IGitConnection
         string refName, string? expectedOldSha, string newSha, CancellationToken ct);
 
     Task<FetchResult> FetchAsync(string refName, CancellationToken ct);
+
+    Task<IReadOnlyList<string>> GetCommitParentsAsync(string commitSha, CancellationToken ct);
 }
