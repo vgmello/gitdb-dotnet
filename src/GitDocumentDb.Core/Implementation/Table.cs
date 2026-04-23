@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Linq.Expressions;
 using System.Text.Json.Nodes;
 using GitDocumentDb.Internal;
 
@@ -155,6 +156,133 @@ internal sealed class Table<T> : ITable<T> where T : class
 
         return await WriteExecutor.ExecuteBatchAsync(_db, prepared, options, ct);
     }
+
+    public async Task<IReadOnlyList<Versioned<T>>> QueryAsync(
+        Query query, ReadOptions? options = null, CancellationToken ct = default)
+    {
+        await MaybeFetchAsync(options, ct);
+        await _db.EnsureOpenedAsync(ct);
+
+        var snap = _db.CurrentSnapshot;
+        if (!snap.Tables.TryGetValue(_name, out var table)) return Array.Empty<Versioned<T>>();
+
+        IEnumerable<string> candidateIds;
+        bool usedIndex = false;
+
+        if (query.Predicate is not null)
+        {
+            var clauses = QueryCompiler.ExtractIndexClauses(query.Predicate);
+            if (clauses is not null && clauses.Count > 0)
+            {
+                HashSet<string>? current = null;
+                foreach (var clause in clauses)
+                {
+                    if (!table.Indexes.TryGetValue(clause.Field, out var idx)) continue;
+                    var ids = ResolveClause(idx, clause);
+                    if (ids is null) continue;
+                    usedIndex = true;
+                    current = current is null
+                        ? new HashSet<string>(ids, StringComparer.Ordinal)
+                        : new HashSet<string>(current.Intersect(ids), StringComparer.Ordinal);
+                }
+                candidateIds = current ?? (IEnumerable<string>)table.Records.Keys;
+            }
+            else
+            {
+                candidateIds = table.Records.Keys;
+            }
+        }
+        else
+        {
+            candidateIds = table.Records.Keys;
+        }
+
+        if (!usedIndex && table.Records.Count > _db.Options.MaxFullScanRecordCount)
+            throw new QueryException(
+                $"Full-table scan on '{_name}' ({table.Records.Count} records) exceeds MaxFullScanRecordCount={_db.Options.MaxFullScanRecordCount}");
+
+        var results = new List<Versioned<T>>();
+        Func<T, bool>? compiled = query.Predicate is Expression<Func<T, bool>> typed ? typed.Compile() : null;
+
+        foreach (var id in candidateIds)
+        {
+            if (!table.Records.TryGetValue(id, out var blobSha)) continue;
+            var bytes = await _db.Connection.GetBlobAsync(blobSha, ct);
+            var record = _db.Serializer.Deserialize<T>(bytes.Span);
+            if (compiled is not null && !compiled(record)) continue;
+            results.Add(new Versioned<T>(record, id, blobSha, snap.CommitSha));
+        }
+
+        if (query.OrderKey is LambdaExpression ok)
+        {
+            var keySelector = ok.Compile();
+            results = query.OrderDescending
+                ? results.OrderByDescending(r => keySelector.DynamicInvoke(r.Record)).ToList()
+                : results.OrderBy(r => keySelector.DynamicInvoke(r.Record)).ToList();
+        }
+
+        if (query.SkipCount.HasValue) results = results.Skip(query.SkipCount.Value).ToList();
+        if (query.TakeCount.HasValue) results = results.Take(query.TakeCount.Value).ToList();
+
+        return results;
+    }
+
+    private static IEnumerable<string>? ResolveClause(
+        GitDocumentDb.Indexing.IIndex idx,
+        QueryCompiler.IndexClause clause)
+    {
+        if (idx is GitDocumentDb.Indexing.EqualityIndex eq && clause.Op == QueryCompiler.IndexOp.Equal)
+        {
+            foreach (var (k, list) in eq.ByValue)
+                if (Compare(k, clause.Value) == 0)
+                    return list;
+            return Array.Empty<string>();
+        }
+        if (idx is GitDocumentDb.Indexing.UniqueEqualityIndex ueq && clause.Op == QueryCompiler.IndexOp.Equal)
+        {
+            foreach (var (k, recId) in ueq.ByValue)
+                if (Compare(k, clause.Value) == 0)
+                    return new[] { recId };
+            return Array.Empty<string>();
+        }
+        if (idx is GitDocumentDb.Indexing.RangeIndex rng)
+        {
+            var matching = new List<string>();
+            foreach (var key in rng.Sorted.Keys)
+            {
+                if (Matches(key, clause)) foreach (var recId in rng.Sorted[key]) matching.Add(recId);
+            }
+            return matching;
+        }
+        return null;
+    }
+
+    private static bool Matches(object key, QueryCompiler.IndexClause clause)
+    {
+        var cmp = Compare(key, clause.Value);
+        return clause.Op switch
+        {
+            QueryCompiler.IndexOp.Equal => cmp == 0,
+            QueryCompiler.IndexOp.Greater => cmp > 0,
+            QueryCompiler.IndexOp.GreaterOrEqual => cmp >= 0,
+            QueryCompiler.IndexOp.Less => cmp < 0,
+            QueryCompiler.IndexOp.LessOrEqual => cmp <= 0,
+            _ => false,
+        };
+    }
+
+    private static int Compare(object a, object b)
+    {
+        // Normalize numeric types: promote to decimal for comparison.
+        if (IsNumeric(a) && IsNumeric(b))
+            return Convert.ToDecimal(a).CompareTo(Convert.ToDecimal(b));
+        if (a is IComparable ac && a.GetType() == b.GetType())
+            return ac.CompareTo(b);
+        return string.Compare(a.ToString(), b.ToString(), StringComparison.Ordinal);
+    }
+
+    private static bool IsNumeric(object? v) =>
+        v is byte or sbyte or short or ushort or int or uint or long or ulong or float or double or decimal;
 
     private async ValueTask MaybeFetchAsync(ReadOptions? options, CancellationToken ct)
     {
