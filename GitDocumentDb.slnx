@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/GitDocumentDb.Core/GitDocumentDb.Core.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/GitDocumentDb.Core.Tests/GitDocumentDb.Core.Tests.csproj" />
+  </Folder>
+</Solution>

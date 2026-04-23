@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>GitDocumentDb</RootNamespace>
+    <AssemblyName>GitDocumentDb.Core</AssemblyName>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <!-- CS1591: skip missing XML docs. NU1510: System.Collections.Immutable is part of net10 shared framework. -->
+    <NoWarn>$(NoWarn);CS1591;NU1510</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="System.Collections.Immutable" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="GitDocumentDb.Core.Tests" />
+  </ItemGroup>
+</Project>
