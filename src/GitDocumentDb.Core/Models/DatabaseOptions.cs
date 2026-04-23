@@ -10,4 +10,6 @@ public sealed class DatabaseOptions
     public int MaxSnapshotCacheCount { get; init; } = 2;
     public string DefaultAuthorName { get; init; } = "GitDocumentDb";
     public string DefaultAuthorEmail { get; init; } = "gitdb@localhost";
+    public IReadOnlyDictionary<Type, object> RecordMergers { get; init; } =
+        new Dictionary<Type, object>();
 }
