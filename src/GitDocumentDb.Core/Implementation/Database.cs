@@ -62,6 +62,15 @@ public sealed class Database : IDatabase
         if (string.IsNullOrEmpty(remoteSha) || remoteSha == previous)
             return new FetchResult(false, previous, previous, Array.Empty<string>());
 
+        var reason = ChangeReason.RemoteAdvance;
+        if (!string.IsNullOrEmpty(previous))
+        {
+            var isAncestor = await AncestorWalker.IsAncestorAsync(
+                _connection, previous, remoteSha, maxDepth: 1000, ct);
+            if (!isAncestor)
+                reason = ChangeReason.HistoryRewritten;
+        }
+
         var newSnap = await SnapshotBuilder.BuildAsync(_connection, remoteSha, ct);
         SwapSnapshot(newSnap);
 
@@ -69,7 +78,7 @@ public sealed class Database : IDatabase
             remoteSha,
             DateTimeOffset.UtcNow,
             Array.Empty<string>(),
-            ChangeReason.RemoteAdvance));
+            reason));
 
         return new FetchResult(true, previous, remoteSha, Array.Empty<string>());
     }
