@@ -2,6 +2,7 @@ using System.Collections.Frozen;
 using System.Runtime.CompilerServices;
 using System.Threading.Channels;
 using GitDocumentDb.Internal;
+using GitDocumentDb.Schema;
 using GitDocumentDb.Transport;
 
 namespace GitDocumentDb.Implementation;
@@ -121,5 +122,5 @@ public sealed class Database : IDatabase
     }
 
     private static DatabaseSnapshot EmptySnapshot() =>
-        new("", DateTimeOffset.MinValue, FrozenDictionary<string, TableSnapshot>.Empty);
+        new("", DateTimeOffset.MinValue, DatabaseSchema.Empty, FrozenDictionary<string, TableSnapshot>.Empty);
 }

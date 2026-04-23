@@ -1,4 +1,6 @@
 using System.Collections.Frozen;
+using GitDocumentDb.Indexing;
+using GitDocumentDb.Schema;
 using GitDocumentDb.Transport;
 
 namespace GitDocumentDb.Internal;
@@ -10,6 +12,7 @@ internal static class SnapshotBuilder
         string commitSha,
         CancellationToken ct)
     {
+        var schema = await SchemaLoader.LoadAsync(connection, commitSha, ct);
         var tree = await connection.GetTreeAsync(commitSha, ct);
         var tables = new Dictionary<string, TableSnapshot>(StringComparer.Ordinal);
 
@@ -24,14 +27,23 @@ internal static class SnapshotBuilder
                 var id = StripExtension(recordEntry.Name);
                 records[id] = sha;
             }
+
+            var tableSchema = schema.Tables.TryGetValue(tableEntry.Name, out var ts)
+                ? ts
+                : new TableSchema(tableEntry.Name, Array.Empty<IndexDefinition>());
+
+            var buildResult = await IndexBuilder.BuildAsync(connection, tableSchema, records, ct);
+
             tables[tableEntry.Name] = new TableSnapshot(
                 tableEntry.Name,
-                records.ToFrozenDictionary(StringComparer.Ordinal));
+                records.ToFrozenDictionary(StringComparer.Ordinal),
+                buildResult.Indexes);
         }
 
         return new DatabaseSnapshot(
             commitSha,
             DateTimeOffset.UtcNow,
+            schema,
             tables.ToFrozenDictionary(StringComparer.Ordinal));
     }
 
