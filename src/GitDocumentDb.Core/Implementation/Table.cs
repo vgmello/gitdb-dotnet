@@ -72,10 +72,7 @@ internal sealed class Table<T> : ITable<T> where T : class
             if (op.Kind == WriteOpKind.Put)
             {
                 if (op.Record is null)
-                {
-                    failures[op.Id] = new OperationResult(op.Id, false, null, null, WriteFailureReason.InvalidId);
-                    continue;
-                }
+                    throw new ArgumentNullException("operation.Record");
                 var writer = new ArrayBufferWriter<byte>();
                 _db.Serializer.Serialize(op.Record, writer);
                 var bytes = writer.WrittenMemory;

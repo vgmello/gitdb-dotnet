@@ -56,6 +56,18 @@ public class TableBatchTests
     }
 
     [Fact]
+    public async Task Batch_with_null_put_record_throws()
+    {
+        var t = NewTable();
+        var ops = new[]
+        {
+            new WriteOperation<Account>(WriteOpKind.Put, "a", null, null),
+        };
+        var act = async () => await t.CommitAsync(ops, null, Ct);
+        await act.Should().ThrowAsync<ArgumentNullException>();
+    }
+
+    [Fact]
     public async Task Oversized_record_fails_batch_pre_push()
     {
         var c = new InMemoryGitConnection();
