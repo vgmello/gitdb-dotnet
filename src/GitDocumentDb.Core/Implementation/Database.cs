@@ -1,4 +1,6 @@
 using System.Collections.Frozen;
+using System.Runtime.CompilerServices;
+using System.Threading.Channels;
 using GitDocumentDb.Internal;
 using GitDocumentDb.Transport;
 
@@ -11,6 +13,8 @@ public sealed class Database : IDatabase
     private readonly DatabaseOptions _options;
     private readonly string _refName;
     private readonly SemaphoreSlim _writeLock = new(1, 1);
+    private readonly List<Channel<ChangeNotification>> _subscribers = new();
+    private readonly object _subscriberLock = new();
     private DatabaseSnapshot _snapshot;
 
     internal Database(string name, IGitConnection connection, IRecordSerializer serializer, DatabaseOptions options)
@@ -60,11 +64,36 @@ public sealed class Database : IDatabase
 
         var newSnap = await SnapshotBuilder.BuildAsync(_connection, remoteSha, ct);
         SwapSnapshot(newSnap);
+
+        PublishNotification(new ChangeNotification(
+            remoteSha,
+            DateTimeOffset.UtcNow,
+            Array.Empty<string>(),
+            ChangeReason.RemoteAdvance));
+
         return new FetchResult(true, previous, remoteSha, Array.Empty<string>());
     }
 
-    public IAsyncEnumerable<ChangeNotification> WatchAsync(CancellationToken ct = default)
-        => throw new NotImplementedException("Implemented in Task 16");
+    public async IAsyncEnumerable<ChangeNotification> WatchAsync(
+        [EnumeratorCancellation] CancellationToken ct = default)
+    {
+        var channel = Channel.CreateUnbounded<ChangeNotification>(
+            new UnboundedChannelOptions { SingleReader = true });
+        lock (_subscriberLock) _subscribers.Add(channel);
+        try
+        {
+            while (await channel.Reader.WaitToReadAsync(ct))
+            {
+                while (channel.Reader.TryRead(out var n))
+                    yield return n;
+            }
+        }
+        finally
+        {
+            lock (_subscriberLock) _subscribers.Remove(channel);
+            channel.Writer.TryComplete();
+        }
+    }
 
     internal async Task EnsureOpenedAsync(CancellationToken ct)
     {
@@ -73,6 +102,13 @@ public sealed class Database : IDatabase
         if (string.IsNullOrEmpty(remoteSha)) return;
         var snap = await SnapshotBuilder.BuildAsync(_connection, remoteSha, ct);
         SwapSnapshot(snap);
+    }
+
+    private void PublishNotification(ChangeNotification notification)
+    {
+        Channel<ChangeNotification>[] subs;
+        lock (_subscriberLock) subs = _subscribers.ToArray();
+        foreach (var s in subs) s.Writer.TryWrite(notification);
     }
 
     private static DatabaseSnapshot EmptySnapshot() =>
