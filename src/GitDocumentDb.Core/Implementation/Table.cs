@@ -17,7 +17,6 @@ internal sealed class Table<T> : ITable<T> where T : class
     public async ValueTask<Versioned<T>?> GetAsync(string id, ReadOptions? options = null, CancellationToken ct = default)
     {
         RecordIdValidator.ThrowIfInvalid(id, nameof(id));
-
         await MaybeFetchAsync(options, ct);
         await _db.EnsureOpenedAsync(ct);
 
@@ -35,18 +34,65 @@ internal sealed class Table<T> : ITable<T> where T : class
         RecordIdValidator.ThrowIfInvalid(id, nameof(id));
         ArgumentNullException.ThrowIfNull(record);
 
-        var writer = new ArrayBufferWriter<byte>();
-        _db.Serializer.Serialize(record, writer);
-        var bytes = writer.WrittenMemory;
+        options ??= new WriteOptions();
+        var effectiveRecord = record;
+        var effectiveOptions = options;
+        var path = $"tables/{_name}/{id}{_db.Serializer.FileExtension}";
 
+        if (options.Mode == ConcurrencyMode.OptimisticMerge
+            && options.ExpectedVersion is not null
+            && options.ExpectedVersion != Versions.Absent)
+        {
+            await _db.EnsureOpenedAsync(ct);
+            var snap = _db.CurrentSnapshot;
+            var current = LookupCurrentVersion(snap, id);
+            if (current is not null && current != options.ExpectedVersion)
+            {
+                var merge = await TryMergeAsync(id, record, options.ExpectedVersion, current, ct);
+                if (merge.Conflict is not null)
+                    return new WriteResult(false, null, null, merge.Conflict, null);
+                if (merge.MergedRecord is not null)
+                    effectiveRecord = merge.MergedRecord;
+
+                // Re-read current as the effective expected version for push-time CAS.
+                // Promote to OptimisticReject — the merge is already resolved.
+                effectiveOptions = new WriteOptions
+                {
+                    Mode = ConcurrencyMode.OptimisticReject,
+                    ExpectedVersion = current,
+                    MaxRetries = options.MaxRetries,
+                    RetryBackoff = options.RetryBackoff,
+                    MaxRetryBackoff = options.MaxRetryBackoff,
+                    Author = options.Author,
+                    CommitMessage = options.CommitMessage,
+                };
+            }
+            else if (current is null)
+            {
+                // Record disappeared between read and write. Promote to reject with Absent.
+                effectiveOptions = new WriteOptions
+                {
+                    Mode = ConcurrencyMode.OptimisticReject,
+                    ExpectedVersion = Versions.Absent,
+                    MaxRetries = options.MaxRetries,
+                    RetryBackoff = options.RetryBackoff,
+                    MaxRetryBackoff = options.MaxRetryBackoff,
+                    Author = options.Author,
+                    CommitMessage = options.CommitMessage,
+                };
+            }
+        }
+
+        var writer = new ArrayBufferWriter<byte>();
+        _db.Serializer.Serialize(effectiveRecord, writer);
+        var bytes = writer.WrittenMemory;
         if (bytes.Length > _db.Options.RecordSizeHardLimitBytes)
             return new WriteResult(false, null, null, null, WriteFailureReason.RecordTooLarge);
 
         var blobSha = await _db.Connection.WriteBlobAsync(bytes, ct);
-        var path = $"tables/{_name}/{id}{_db.Serializer.FileExtension}";
         var op = new WriteExecutor.PreparedOperation(
-            _name, id, path, WriteOpKind.Put, blobSha, options?.ExpectedVersion);
-        return await WriteExecutor.ExecuteSingleAsync(_db, op, options, ct);
+            _name, id, path, WriteOpKind.Put, blobSha, effectiveOptions.ExpectedVersion);
+        return await WriteExecutor.ExecuteSingleAsync(_db, op, effectiveOptions, ct);
     }
 
     public async Task<WriteResult> DeleteAsync(string id, WriteOptions? options = null, CancellationToken ct = default)
@@ -116,5 +162,37 @@ internal sealed class Table<T> : ITable<T> where T : class
         {
             await _db.FetchAsync(ct);
         }
+    }
+
+    private string? LookupCurrentVersion(DatabaseSnapshot snap, string id)
+    {
+        if (!snap.Tables.TryGetValue(_name, out var table)) return null;
+        return table.Records.TryGetValue(id, out var sha) ? sha : null;
+    }
+
+    private async Task<(T? MergedRecord, ConflictInfo? Conflict)> TryMergeAsync(
+        string id, T local, string baseVersion, string currentVersion, CancellationToken ct)
+    {
+        if (!_db.Options.RecordMergers.TryGetValue(typeof(T), out var mergerObj)
+            || mergerObj is not IRecordMerger<T> merger)
+        {
+            return (default, new ConflictInfo(
+                $"tables/{_name}/{id}{_db.Serializer.FileExtension}",
+                baseVersion, currentVersion, null, ConflictReason.VersionMismatch));
+        }
+
+        var baseBytes = await _db.Connection.GetBlobAsync(baseVersion, ct);
+        var currentBytes = await _db.Connection.GetBlobAsync(currentVersion, ct);
+        var baseRecord = _db.Serializer.Deserialize<T>(baseBytes.Span);
+        var remoteRecord = _db.Serializer.Deserialize<T>(currentBytes.Span);
+
+        var result = merger.Merge(baseRecord, local, remoteRecord);
+        if (!result.Succeeded)
+        {
+            return (default, new ConflictInfo(
+                $"tables/{_name}/{id}{_db.Serializer.FileExtension}",
+                baseVersion, currentVersion, currentBytes, ConflictReason.UnmergeableChange));
+        }
+        return (result.Merged, null);
     }
 }
