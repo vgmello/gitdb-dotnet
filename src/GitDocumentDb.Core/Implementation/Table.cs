@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Text.Json.Nodes;
 using GitDocumentDb.Internal;
 
 namespace GitDocumentDb.Implementation;
@@ -90,8 +91,9 @@ internal sealed class Table<T> : ITable<T> where T : class
             return new WriteResult(false, null, null, null, WriteFailureReason.RecordTooLarge);
 
         var blobSha = await _db.Connection.WriteBlobAsync(bytes, ct);
+        var recordJson = JsonNode.Parse(bytes.Span);
         var op = new WriteExecutor.PreparedOperation(
-            _name, id, path, WriteOpKind.Put, blobSha, effectiveOptions.ExpectedVersion);
+            _name, id, path, WriteOpKind.Put, blobSha, effectiveOptions.ExpectedVersion, recordJson);
         return await WriteExecutor.ExecuteSingleAsync(_db, op, effectiveOptions, ct);
     }
 
@@ -100,7 +102,7 @@ internal sealed class Table<T> : ITable<T> where T : class
         RecordIdValidator.ThrowIfInvalid(id, nameof(id));
         var path = $"tables/{_name}/{id}{_db.Serializer.FileExtension}";
         var op = new WriteExecutor.PreparedOperation(
-            _name, id, path, WriteOpKind.Delete, null, options?.ExpectedVersion);
+            _name, id, path, WriteOpKind.Delete, null, options?.ExpectedVersion, RecordJson: null);
         return await WriteExecutor.ExecuteSingleAsync(_db, op, options, ct);
     }
 
@@ -130,13 +132,14 @@ internal sealed class Table<T> : ITable<T> where T : class
                     continue;
                 }
                 var blobSha = await _db.Connection.WriteBlobAsync(bytes, ct);
+                var recordJson = JsonNode.Parse(bytes.Span);
                 prepared.Add(new WriteExecutor.PreparedOperation(
-                    _name, op.Id, path, WriteOpKind.Put, blobSha, op.ExpectedVersion));
+                    _name, op.Id, path, WriteOpKind.Put, blobSha, op.ExpectedVersion, recordJson));
             }
             else
             {
                 prepared.Add(new WriteExecutor.PreparedOperation(
-                    _name, op.Id, path, WriteOpKind.Delete, null, op.ExpectedVersion));
+                    _name, op.Id, path, WriteOpKind.Delete, null, op.ExpectedVersion, RecordJson: null));
             }
         }
 

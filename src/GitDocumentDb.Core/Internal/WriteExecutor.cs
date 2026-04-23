@@ -1,4 +1,7 @@
+using System.Text.Json.Nodes;
 using GitDocumentDb.Implementation;
+using GitDocumentDb.Indexing;
+using GitDocumentDb.Schema;
 using GitDocumentDb.Transport;
 
 namespace GitDocumentDb.Internal;
@@ -11,7 +14,8 @@ internal static class WriteExecutor
         string Path,
         WriteOpKind Kind,
         string? BlobSha,
-        string? ExpectedVersion);
+        string? ExpectedVersion,
+        JsonNode? RecordJson);
 
     public static async Task<WriteResult> ExecuteSingleAsync(
         Database db,
@@ -113,6 +117,34 @@ internal static class WriteExecutor
             }
         }
 
+        // Unique index enforcement (independent of concurrency mode).
+        foreach (var op in operations)
+        {
+            if (op.Kind != WriteOpKind.Put || op.RecordJson is null) continue;
+            if (!snap.Tables.TryGetValue(op.TableName, out var table)) continue;
+            if (!snap.Schema.Tables.TryGetValue(op.TableName, out var tableSchema)) continue;
+
+            foreach (var idxDef in tableSchema.Indexes)
+            {
+                if (!idxDef.Unique || idxDef.Type != IndexType.Equality) continue;
+
+                var newValue = RecordFieldAccessor.Read(op.RecordJson, idxDef.Field);
+                if (newValue is null) continue;
+
+                if (table.Indexes.TryGetValue(idxDef.Field, out var indexObj)
+                    && indexObj is UniqueEqualityIndex uidx)
+                {
+                    if (uidx.ByValue.TryGetValue(newValue, out var owner) && owner != op.Id)
+                    {
+                        var conflict = new ConflictInfo(
+                            op.Path, op.ExpectedVersion ?? "", owner, null,
+                            ConflictReason.UniqueViolation);
+                        return (false, null, op.Id, conflict);
+                    }
+                }
+            }
+        }
+
         // Rebuild the full tree on each write from the current snapshot, then apply mutations.
         // Real transports in Phase 4 will use base-tree diffing; the in-memory fake works
         // either way. The snapshot doesn't carry file extensions, so we re-attach the
@@ -123,6 +155,18 @@ internal static class WriteExecutor
         foreach (var (tableName, table) in snap.Tables)
             foreach (var (id, blobSha) in table.Records)
                 desiredEntries[$"tables/{tableName}/{id}{ext}"] = blobSha;
+
+        // Preserve non-table entries (e.g. .schema.json) from the current tree.
+        if (snap.CommitSha.Length > 0)
+        {
+            var currentTree = await db.Connection.GetTreeAsync(snap.CommitSha, ct);
+            foreach (var entry in currentTree.EnumerateChildren(""))
+            {
+                if (entry.Kind != TreeEntryKind.Blob) continue;
+                if (currentTree.TryGetBlob(entry.Name, out var sha))
+                    desiredEntries.TryAdd(entry.Name, sha);
+            }
+        }
 
         var anyChange = false;
         foreach (var op in operations)
