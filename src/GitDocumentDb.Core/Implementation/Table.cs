@@ -1,3 +1,4 @@
+using System.Buffers;
 using GitDocumentDb.Internal;
 
 namespace GitDocumentDb.Implementation;
@@ -29,10 +30,32 @@ internal sealed class Table<T> : ITable<T> where T : class
         return new Versioned<T>(record, id, blobSha, snap.CommitSha);
     }
 
-    public Task<WriteResult> PutAsync(string id, T record, WriteOptions? options = null, CancellationToken ct = default)
-        => throw new NotImplementedException("Implemented in Task 13");
-    public Task<WriteResult> DeleteAsync(string id, WriteOptions? options = null, CancellationToken ct = default)
-        => throw new NotImplementedException("Implemented in Task 13");
+    public async Task<WriteResult> PutAsync(string id, T record, WriteOptions? options = null, CancellationToken ct = default)
+    {
+        RecordIdValidator.ThrowIfInvalid(id, nameof(id));
+        ArgumentNullException.ThrowIfNull(record);
+
+        var writer = new ArrayBufferWriter<byte>();
+        _db.Serializer.Serialize(record, writer);
+        var bytes = writer.WrittenMemory;
+
+        if (bytes.Length > _db.Options.RecordSizeHardLimitBytes)
+            return new WriteResult(false, null, null, null, WriteFailureReason.RecordTooLarge);
+
+        var blobSha = await _db.Connection.WriteBlobAsync(bytes, ct);
+        var path = $"tables/{_name}/{id}{_db.Serializer.FileExtension}";
+        var op = new WriteExecutor.PreparedOperation(_name, id, path, WriteOpKind.Put, blobSha);
+        return await WriteExecutor.ExecuteSingleAsync(_db, op, options, ct);
+    }
+
+    public async Task<WriteResult> DeleteAsync(string id, WriteOptions? options = null, CancellationToken ct = default)
+    {
+        RecordIdValidator.ThrowIfInvalid(id, nameof(id));
+        var path = $"tables/{_name}/{id}{_db.Serializer.FileExtension}";
+        var op = new WriteExecutor.PreparedOperation(_name, id, path, WriteOpKind.Delete, null);
+        return await WriteExecutor.ExecuteSingleAsync(_db, op, options, ct);
+    }
+
     public Task<BatchResult> CommitAsync(IEnumerable<WriteOperation<T>> operations, WriteOptions? options = null, CancellationToken ct = default)
         => throw new NotImplementedException("Implemented in Task 14");
 
