@@ -56,8 +56,55 @@ internal sealed class Table<T> : ITable<T> where T : class
         return await WriteExecutor.ExecuteSingleAsync(_db, op, options, ct);
     }
 
-    public Task<BatchResult> CommitAsync(IEnumerable<WriteOperation<T>> operations, WriteOptions? options = null, CancellationToken ct = default)
-        => throw new NotImplementedException("Implemented in Task 14");
+    public async Task<BatchResult> CommitAsync(
+        IEnumerable<WriteOperation<T>> operations,
+        WriteOptions? options = null,
+        CancellationToken ct = default)
+    {
+        var opList = operations.ToList();
+        var prepared = new List<WriteExecutor.PreparedOperation>(opList.Count);
+        var failures = new Dictionary<string, OperationResult>(StringComparer.Ordinal);
+
+        foreach (var op in opList)
+        {
+            RecordIdValidator.ThrowIfInvalid(op.Id, "operation.Id");
+            var path = $"tables/{_name}/{op.Id}{_db.Serializer.FileExtension}";
+            if (op.Kind == WriteOpKind.Put)
+            {
+                if (op.Record is null)
+                {
+                    failures[op.Id] = new OperationResult(op.Id, false, null, null, WriteFailureReason.InvalidId);
+                    continue;
+                }
+                var writer = new ArrayBufferWriter<byte>();
+                _db.Serializer.Serialize(op.Record, writer);
+                var bytes = writer.WrittenMemory;
+                if (bytes.Length > _db.Options.RecordSizeHardLimitBytes)
+                {
+                    failures[op.Id] = new OperationResult(op.Id, false, null, null, WriteFailureReason.RecordTooLarge);
+                    continue;
+                }
+                var blobSha = await _db.Connection.WriteBlobAsync(bytes, ct);
+                prepared.Add(new WriteExecutor.PreparedOperation(_name, op.Id, path, WriteOpKind.Put, blobSha));
+            }
+            else
+            {
+                prepared.Add(new WriteExecutor.PreparedOperation(_name, op.Id, path, WriteOpKind.Delete, null));
+            }
+        }
+
+        if (failures.Count > 0)
+        {
+            var all = opList.Select(o =>
+                failures.TryGetValue(o.Id, out var f)
+                    ? f
+                    : new OperationResult(o.Id, false, null, null, null))
+                .ToList();
+            return new BatchResult(false, null, all);
+        }
+
+        return await WriteExecutor.ExecuteBatchAsync(_db, prepared, options, ct);
+    }
 
     private async ValueTask MaybeFetchAsync(ReadOptions? options, CancellationToken ct)
     {
