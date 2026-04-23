@@ -44,7 +44,8 @@ internal sealed class Table<T> : ITable<T> where T : class
 
         var blobSha = await _db.Connection.WriteBlobAsync(bytes, ct);
         var path = $"tables/{_name}/{id}{_db.Serializer.FileExtension}";
-        var op = new WriteExecutor.PreparedOperation(_name, id, path, WriteOpKind.Put, blobSha);
+        var op = new WriteExecutor.PreparedOperation(
+            _name, id, path, WriteOpKind.Put, blobSha, options?.ExpectedVersion);
         return await WriteExecutor.ExecuteSingleAsync(_db, op, options, ct);
     }
 
@@ -52,7 +53,8 @@ internal sealed class Table<T> : ITable<T> where T : class
     {
         RecordIdValidator.ThrowIfInvalid(id, nameof(id));
         var path = $"tables/{_name}/{id}{_db.Serializer.FileExtension}";
-        var op = new WriteExecutor.PreparedOperation(_name, id, path, WriteOpKind.Delete, null);
+        var op = new WriteExecutor.PreparedOperation(
+            _name, id, path, WriteOpKind.Delete, null, options?.ExpectedVersion);
         return await WriteExecutor.ExecuteSingleAsync(_db, op, options, ct);
     }
 
@@ -82,11 +84,13 @@ internal sealed class Table<T> : ITable<T> where T : class
                     continue;
                 }
                 var blobSha = await _db.Connection.WriteBlobAsync(bytes, ct);
-                prepared.Add(new WriteExecutor.PreparedOperation(_name, op.Id, path, WriteOpKind.Put, blobSha));
+                prepared.Add(new WriteExecutor.PreparedOperation(
+                    _name, op.Id, path, WriteOpKind.Put, blobSha, op.ExpectedVersion));
             }
             else
             {
-                prepared.Add(new WriteExecutor.PreparedOperation(_name, op.Id, path, WriteOpKind.Delete, null));
+                prepared.Add(new WriteExecutor.PreparedOperation(
+                    _name, op.Id, path, WriteOpKind.Delete, null, op.ExpectedVersion));
             }
         }
 

@@ -10,7 +10,8 @@ internal static class WriteExecutor
         string Id,
         string Path,
         WriteOpKind Kind,
-        string? BlobSha);
+        string? BlobSha,
+        string? ExpectedVersion);
 
     public static async Task<WriteResult> ExecuteSingleAsync(
         Database db,
@@ -32,6 +33,11 @@ internal static class WriteExecutor
                     var newVersion = op.Kind == WriteOpKind.Put ? op.BlobSha : null;
                     return new WriteResult(true, newVersion, result.newCommitSha, null, null);
                 }
+                if (result.conflict is not null)
+                {
+                    return new WriteResult(false, null, null, result.conflict, null);
+                }
+                // Push rejection — fetch + retry.
                 await db.FetchAsync(ct);
                 await Task.Delay(ComputeBackoff(options, attempt), ct);
             }
@@ -66,6 +72,15 @@ internal static class WriteExecutor
                             null, null)).ToList();
                     return new BatchResult(true, result.newCommitSha, ops);
                 }
+                if (result.conflict is not null)
+                {
+                    var ops = operations.Select(o =>
+                        o.Id == result.conflictOpId
+                            ? new OperationResult(o.Id, false, null, result.conflict, null)
+                            : new OperationResult(o.Id, false, null, null, null))
+                        .ToList();
+                    return new BatchResult(false, null, ops);
+                }
                 await db.FetchAsync(ct);
                 await Task.Delay(ComputeBackoff(options, attempt), ct);
             }
@@ -79,13 +94,25 @@ internal static class WriteExecutor
         }
     }
 
-    private static async Task<(bool success, string? newCommitSha)> TryCommitAsync(
+    private static async Task<(bool success, string? newCommitSha, string? conflictOpId, ConflictInfo? conflict)> TryCommitAsync(
         Database db,
         DatabaseSnapshot snap,
         IReadOnlyList<PreparedOperation> operations,
         WriteOptions options,
         CancellationToken ct)
     {
+        // OptimisticReject: per-op version check.
+        if (options.Mode == ConcurrencyMode.OptimisticReject)
+        {
+            foreach (var op in operations)
+            {
+                var currentVersion = LookupCurrentVersion(snap, op.TableName, op.Id);
+                var conflict = CheckReject(op, currentVersion);
+                if (conflict is not null)
+                    return (false, null, op.Id, conflict);
+            }
+        }
+
         // Rebuild the full tree on each write from the current snapshot, then apply mutations.
         // Real transports in Phase 4 will use base-tree diffing; the in-memory fake works
         // either way. The snapshot doesn't carry file extensions, so we re-attach the
@@ -115,7 +142,7 @@ internal static class WriteExecutor
         }
 
         if (!anyChange)
-            return (true, snap.CommitSha);
+            return (true, snap.CommitSha, null, null);
 
         var mutations = desiredEntries
             .Select(kv => new TreeMutation(TreeMutationKind.Upsert, kv.Key, kv.Value))
@@ -134,11 +161,41 @@ internal static class WriteExecutor
 
         var expectedOld = snap.CommitSha.Length == 0 ? null : snap.CommitSha;
         var push = await db.Connection.UpdateRefAsync(db.RefName, expectedOld, newCommit, ct);
-        if (!push.Success) return (false, null);
+        if (!push.Success) return (false, null, null, null);
 
         var newSnap = await SnapshotBuilder.BuildAsync(db.Connection, newCommit, ct);
         db.SwapSnapshot(newSnap);
-        return (true, newCommit);
+        return (true, newCommit, null, null);
+    }
+
+    private static string? LookupCurrentVersion(DatabaseSnapshot snap, string tableName, string id)
+    {
+        if (!snap.Tables.TryGetValue(tableName, out var table)) return null;
+        return table.Records.TryGetValue(id, out var sha) ? sha : null;
+    }
+
+    private static ConflictInfo? CheckReject(PreparedOperation op, string? currentVersion)
+    {
+        if (op.Kind == WriteOpKind.Put && op.ExpectedVersion == Versions.Absent && currentVersion is not null)
+            return new ConflictInfo(op.Path, Versions.Absent, currentVersion, null, ConflictReason.ExpectedAbsentButPresent);
+
+        if (op.Kind == WriteOpKind.Put && op.ExpectedVersion is not null && op.ExpectedVersion != Versions.Absent)
+        {
+            if (currentVersion != op.ExpectedVersion)
+                return new ConflictInfo(op.Path, op.ExpectedVersion, currentVersion ?? "", null, ConflictReason.VersionMismatch);
+        }
+
+        if (op.Kind == WriteOpKind.Delete && op.ExpectedVersion is not null)
+        {
+            if (op.ExpectedVersion == Versions.Absent)
+                return new ConflictInfo(op.Path, Versions.Absent, currentVersion ?? "", null, ConflictReason.VersionMismatch);
+            if (currentVersion is null)
+                return new ConflictInfo(op.Path, op.ExpectedVersion, "", null, ConflictReason.ExpectedPresentButAbsent);
+            if (currentVersion != op.ExpectedVersion)
+                return new ConflictInfo(op.Path, op.ExpectedVersion, currentVersion, null, ConflictReason.VersionMismatch);
+        }
+
+        return null;
     }
 
     private static TimeSpan ComputeBackoff(WriteOptions options, int attempt)
